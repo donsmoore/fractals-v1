@@ -1,14 +1,17 @@
 #!/bin/bash
 
 # Deployment script for Fractals v1
-# Run this script on your AWS EC2 server in /var/www/html/fractals/v1
+# Run this script from the project directory (e.g., /var/www/html/donsmoore.com/fractals/v1)
 
 set -e  # Exit on error
 
-echo "🚀 Starting Fractals v1 deployment..."
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
 
-# Navigate to application directory
-cd /var/www/html/fractals/v1
+PROJECT_DIR="$SCRIPT_DIR"
+echo "🚀 Starting Fractals v1 deployment..."
+echo "📁 Project directory: $PROJECT_DIR"
 
 # Fix Git ownership and permissions (if needed)
 echo "🔧 Fixing Git permissions..."
@@ -16,7 +19,7 @@ CURRENT_USER=$(whoami)
 # Fix ownership of entire directory temporarily for git operations
 sudo chown -R $CURRENT_USER:$CURRENT_USER .
 if [ -d .git ]; then
-    git config --global --add safe.directory /var/www/html/fractals/v1
+    git config --global --add safe.directory "$PROJECT_DIR"
 fi
 
 # Pull latest changes from GitHub (if using git)

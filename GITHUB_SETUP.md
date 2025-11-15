@@ -58,18 +58,16 @@ go version
 
 3. Clone the repository:
 ```bash
-cd /var/www/html
+cd /var/www/html/donsmoore.com
 sudo mkdir -p fractals/v1
 sudo chown $USER:$USER fractals/v1
 cd fractals/v1
-git clone https://github.com/YOUR_USERNAME/fractals-v1.git .
-# Or if using SSH:
-# git clone git@github.com:YOUR_USERNAME/fractals-v1.git .
+git clone git@github.com:donsmoore/fractals-v1.git .
 ```
 
 4. Run the deployment script:
 ```bash
-cd /var/www/html/fractals/v1
+cd /var/www/html/donsmoore.com/fractals/v1
 chmod +x deploy.sh
 ./deploy.sh
 ```
@@ -90,7 +88,7 @@ sudo systemctl restart apache2
 To deploy updates from GitHub:
 
 ```bash
-cd /var/www/html/fractals/v1
+cd /var/www/html/donsmoore.com/fractals/v1
 ./deploy.sh
 ```
 
@@ -120,8 +118,8 @@ If you get authentication errors when pushing/pulling:
 
 If you get permission errors:
 ```bash
-sudo chown -R $USER:$USER /var/www/html/fractals/v1
-sudo chown -R $USER:$USER /var/www/html/fractals/v1/.git
+sudo chown -R $USER:$USER /var/www/html/donsmoore.com/fractals/v1
+sudo chown -R $USER:$USER /var/www/html/donsmoore.com/fractals/v1/.git
 ```
 
 ### Service Won't Start

@@ -6,9 +6,9 @@ After=network.target
 Type=simple
 User=www-data
 Group=www-data
-WorkingDirectory=/var/www/html/fractals/v1
+WorkingDirectory=/var/www/html/donsmoore.com/fractals/v1
 Environment="PORT=8080"
-ExecStart=/var/www/html/fractals/v1/fractals
+ExecStart=/var/www/html/donsmoore.com/fractals/v1/fractals
 Restart=always
 RestartSec=10
 StandardOutput=journal
