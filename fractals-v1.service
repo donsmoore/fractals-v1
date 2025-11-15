@@ -1,0 +1,24 @@
+[Unit]
+Description=Fractals v1 Go Web Application
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/html/fractals/v1
+Environment="PORT=8080"
+ExecStart=/var/www/html/fractals/v1/fractals
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fractals-v1
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
