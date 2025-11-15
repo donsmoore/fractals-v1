@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"time"
@@ -16,6 +17,7 @@ type FractalParams struct {
 	CenterY float64 `json:"centerY"`
 	Zoom    float64 `json:"zoom"`
 	MaxIter int     `json:"maxIter"`
+	Exponent float64 `json:"exponent"` // Power for z^n + c (default 2.0 for standard Mandelbrot)
 }
 
 func main() {
@@ -87,6 +89,18 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             gap: 10px;
             flex-wrap: wrap;
             margin: 20px 0;
+            align-items: center;
+        }
+        .control-group {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+            margin-left: 10px;
+        }
+        .control-group label {
+            color: #e0e0e0;
+            font-size: 14px;
+            white-space: nowrap;
         }
         input, button {
             padding: 8px;
@@ -94,6 +108,9 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             border-radius: 4px;
             background: #333;
             color: #e0e0e0;
+        }
+        input[type="number"] {
+            width: 100px;
         }
         button {
             cursor: pointer;
@@ -113,6 +130,11 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         <div class="controls">
             <button onclick="generateFractal()">Generate Fractal</button>
             <button onclick="resetView()">Reset View</button>
+            <div class="control-group">
+                <label for="exponentInput">Exponent (z^n + c):</label>
+                <input type="number" id="exponentInput" step="0.1" min="1" max="10" value="2.0" onkeypress="if(event.key==='Enter') updateExponent()">
+                <button onclick="updateExponent()">Update Exponent</button>
+            </div>
         </div>
     </div>
     <script>
@@ -138,8 +160,14 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             centerX: 0.0,
             centerY: 0.0,
             zoom: 1.0,
-            maxIter: 100
+            maxIter: 100,
+            exponent: 2.0  // Default exponent for standard Mandelbrot (z^2 + c)
         };
+        
+        // Initialize the input field with default value
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('exponentInput').value = params.exponent;
+        });
 
         function generateFractal() {
             params.width = canvas.width;
@@ -204,6 +232,22 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             params.centerX = 0.0;
             params.centerY = 0.0;
             params.zoom = 1.0;
+            params.exponent = 2.0;
+            document.getElementById('exponentInput').value = params.exponent;
+            generateFractal();
+        }
+        
+        function updateExponent() {
+            const exponentInput = document.getElementById('exponentInput');
+            const newExponent = parseFloat(exponentInput.value);
+            
+            if (isNaN(newExponent) || newExponent < 1 || newExponent > 10) {
+                alert('Exponent must be a number between 1 and 10');
+                exponentInput.value = params.exponent;
+                return;
+            }
+            
+            params.exponent = newExponent;
             generateFractal();
         }
 
@@ -242,6 +286,16 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 	if params.Zoom == 0 {
 		params.Zoom = 1.0
 	}
+	if params.Exponent == 0 {
+		params.Exponent = 2.0 // Default to standard Mandelbrot (z^2 + c)
+	}
+	// Validate exponent range (1-10 for reasonable results)
+	if params.Exponent < 1.0 {
+		params.Exponent = 1.0
+	}
+	if params.Exponent > 10.0 {
+		params.Exponent = 10.0
+	}
 
 	// Generate Mandelbrot set fractal
 	pixels := generateMandelbrot(params)
@@ -269,7 +323,7 @@ func generateMandelbrot(params FractalParams) []map[string]int {
 			cy := (float64(y)/float64(params.Height))*scale - scale/2 + yOffset
 
 			// Calculate Mandelbrot iteration
-			iter := mandelbrotIteration(cx, cy, params.MaxIter)
+			iter := mandelbrotIteration(cx, cy, params.MaxIter, params.Exponent)
 
 			// Color based on iteration count
 			r, g, b := colorFromIteration(iter, params.MaxIter)
@@ -286,13 +340,26 @@ func generateMandelbrot(params FractalParams) []map[string]int {
 	return pixels
 }
 
-func mandelbrotIteration(cx, cy float64, maxIter int) int {
+func mandelbrotIteration(cx, cy float64, maxIter int, exponent float64) int {
 	var zx, zy float64
 	for i := 0; i < maxIter; i++ {
 		if zx*zx+zy*zy > 4.0 {
 			return i
 		}
-		zx, zy = zx*zx-zy*zy+cx, 2.0*zx*zy+cy
+		// Calculate z^n where n is the exponent
+		// For z = x + iy, z^n = (x + iy)^n
+		// We use polar form: z = r*e^(iθ), so z^n = r^n * e^(inθ)
+		// r = sqrt(x^2 + y^2), θ = atan2(y, x)
+		r := math.Sqrt(zx*zx + zy*zy)
+		if r == 0 {
+			zx, zy = cx, cy
+			continue
+		}
+		theta := math.Atan2(zy, zx)
+		newR := math.Pow(r, exponent)
+		newTheta := theta * exponent
+		zx = newR*math.Cos(newTheta) + cx
+		zy = newR*math.Sin(newTheta) + cy
 	}
 	return maxIter
 }
