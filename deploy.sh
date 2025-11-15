@@ -22,7 +22,9 @@ fi
 # Pull latest changes from GitHub (if using git)
 if [ -d .git ]; then
     echo "📥 Pulling latest changes from GitHub..."
-    git pull origin main || echo "⚠️  Git pull failed or not a git repo, continuing..."
+    # Try to detect the current branch, default to main
+    BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
+    git pull origin $BRANCH || echo "⚠️  Git pull failed, continuing with local code..."
 fi
 
 # Build the Go application
