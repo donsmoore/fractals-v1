@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"math"
@@ -9,6 +10,11 @@ import (
 	"os"
 	"time"
 	"math/rand"
+	"image"
+	"image/color"
+	"image/png"
+	"bytes"
+	"context"
 )
 
 type FractalParams struct {
@@ -32,31 +38,40 @@ type RandPaletteConfig struct {
     valMax  float64
 }
 
+var renderSem = make(chan struct{}, 1) // limit to 1 concurrent render
+
 func main() {
-	// Serve static files
-	fs := http.FileServer(http.Dir("./static"))
-	http.Handle("/static/", http.StripPrefix("/static/", fs))
+    // Serve static files
+    fs := http.FileServer(http.Dir("./static"))
+    http.Handle("/static/", http.StripPrefix("/static/", fs))
 
-	// API endpoints
-	http.HandleFunc("/api/fractal", handleFractal)
-	http.HandleFunc("/api/health", handleHealth)
+    // API endpoints
+    http.HandleFunc("/api/fractal", handleFractal)
+    http.HandleFunc("/api/health", handleHealth)
 
-	// Root handler
-	http.HandleFunc("/", handleRoot)
+    // Root handler
+    http.HandleFunc("/", handleRoot)
 
-	// Get port from environment variable, default to 8080
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	port = ":" + port
-	
-	log.Printf("Fractals server starting on port %s", port)
-	log.Printf("Access the application at http://localhost%s", port)
-	
-	if err := http.ListenAndServe(port, nil); err != nil {
-		log.Fatal("Server failed to start:", err)
-	}
+    // Get port from environment variable, default to 8080
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8080"
+    }
+    addr := ":" + port
+    log.Printf("Fractals server starting on port %s", addr)
+    log.Printf("Access the application at http://localhost%s", addr)
+
+    srv := &http.Server{
+        Addr:              addr,
+        ReadHeaderTimeout: 5 * time.Second,
+        ReadTimeout:       10 * time.Second,
+        WriteTimeout:      20 * time.Second,
+        IdleTimeout:       60 * time.Second,
+        Handler:           http.DefaultServeMux,
+    }
+    if err := srv.ListenAndServe(); err != nil {
+        log.Fatal("Server failed to start:", err)
+    }
 }
 
 func handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +208,9 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     <script>
         const canvas = document.getElementById('fractalCanvas');
         const ctx = canvas.getContext('2d');
+        const btnGen = document.querySelector('button[onclick="generateFractal()"]');
+        const btnReset = document.querySelector('button[onclick="resetView()"]');
+        const btnPrint = document.querySelector('button[onclick="printFractal()"]');
         // Rectangle zoom state
         let isSelecting = false;
         let selectStart = null; // { nx, ny }
@@ -257,7 +275,13 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             el.textContent = 'Center: (' + fmt(params.centerX) + ', ' + fmt(params.centerY) + ') | Zoom: ' + params.zoom.toFixed(2) + 'x';
         }
 
+        function setBusy(b){
+            [btnGen, btnReset, btnPrint].forEach(el=>{ if(el) el.disabled = !!b; });
+            canvas.style.cursor = b ? 'progress' : 'default';
+        }
+
         function generateFractal() {
+            setBusy(true);
             sizeCanvasToViewport();
             params.width = canvas.width;
             params.height = canvas.height;
@@ -308,22 +332,21 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 console.error('Error:', error);
                 ctx.fillStyle = '#f00';
                 ctx.fillText('Error: ' + error.message, canvas.width / 2, canvas.height / 2);
-            });
+            })
+            .finally(()=>{ setBusy(false); });
         }
 
         function drawFractal(data) {
-            const imageData = ctx.createImageData(canvas.width, canvas.height);
-            for (let i = 0; i < data.pixels.length; i++) {
-                const pixel = data.pixels[i];
-                const idx = i * 4;
-                imageData.data[idx] = pixel.r;
-                imageData.data[idx + 1] = pixel.g;
-                imageData.data[idx + 2] = pixel.b;
-                imageData.data[idx + 3] = 255;
-            }
-            ctx.putImageData(imageData, 0, 0);
-            // cache for overlay drawing
-            try { lastRenderedImageData = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch (e) { lastRenderedImageData = null; }
+            // Draw PNG returned by server, scaling to canvas
+            const srcW = data.renderWidth || canvas.width;
+            const srcH = data.renderHeight || canvas.height;
+            const img = new Image();
+            img.onload = function(){
+                ctx.clearRect(0,0,canvas.width,canvas.height);
+                ctx.drawImage(img, 0, 0, srcW, srcH, 0, 0, canvas.width, canvas.height);
+                try { lastRenderedImageData = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch (e) { lastRenderedImageData = null; }
+            };
+            img.src = 'data:image/png;base64,' + data.pngData;
         }
 
         function resetView() {
@@ -570,16 +593,121 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Generate Mandelbrot set fractal
-	pixels := generateMandelbrot(params, randCfg)
+	// Enforce server-side pixel and iteration caps for low-resource environments
+	constMaxPixels := 400000 // ~0.4M pixels cap to protect tiny instances
+	reqW := params.Width
+	reqH := params.Height
+	if reqW <= 0 { reqW = 1 }
+	if reqH <= 0 { reqH = 1 }
+	// scale down if over cap (preserve aspect)
+	scale := 1.0
+	if float64(reqW*reqH) > float64(constMaxPixels) {
+		scale = math.Sqrt(float64(constMaxPixels) / float64(reqW*reqH))
+	}
+	effW := int(math.Max(1, math.Round(float64(reqW)*scale)))
+	effH := int(math.Max(1, math.Round(float64(reqH)*scale)))
+	// also scale iterations a bit to keep time bounded when downscaling is applied
+	effIter := params.MaxIter
+	if scale < 1.0 {
+		effIter = int(math.Max(10, math.Round(float64(params.MaxIter)*math.Sqrt(scale))))
+	}
+	// use effective sizes for rendering
+	effParams := params
+	effParams.Width = effW
+	effParams.Height = effH
+	effParams.MaxIter = effIter
+
+	// Limit concurrency
+	select {
+	case renderSem <- struct{}{}:
+		defer func(){ <-renderSem }()
+	case <-time.After(2 * time.Second):
+		http.Error(w, "server busy, try again", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Set an upper bound on render time
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Render PNG
+	pngBytes, err := renderPNG(ctx, effParams, randCfg)
+	if err != nil {
+		if ctx.Err() != nil {
+			http.Error(w, "render timeout", http.StatusGatewayTimeout)
+			return
+		}
+		http.Error(w, "render error", http.StatusInternalServerError)
+		return
+	}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
 
 	response := map[string]interface{}{
-		"pixels": pixels,
-		"params": params,
+		"pngData":       b64,
+		"params":        params,
+		"renderWidth":   effW,
+		"renderHeight":  effH,
+		"usedIterations": effIter,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func renderPNG(ctx context.Context, params FractalParams, randCfg *RandPaletteConfig) ([]byte, error) {
+	img := image.NewRGBA(image.Rect(0, 0, params.Width, params.Height))
+	// generate into RGBA buffer
+	stride := img.Stride
+	// compute once per request palette behavior (random handled already in colorFromIteration via randCfg)
+	for y := 0; y < params.Height; y++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		ny := y
+		_ = ny
+		for x := 0; x < params.Width; x++ {
+			// compute color via existing pipeline
+			// map to complex plane
+			scale := 4.0 / params.Zoom
+			cx := (float64(x)/float64(params.Width))*scale - scale/2 + params.CenterX
+			cy := (float64(y)/float64(params.Height))*scale - scale/2 + params.CenterY
+			it := mandelIterFast(cx, cy, params.MaxIter, params.Exponent)
+			r, g, b := colorFromIteration(it, params.MaxIter, params.ColorPalette, randCfg)
+			off := y*stride + x*4
+			img.Pix[off+0] = uint8(r)
+			img.Pix[off+1] = uint8(g)
+			img.Pix[off+2] = uint8(b)
+			img.Pix[off+3] = 255
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// Faster Mandelbrot iteration with special-case for exponent 2 to avoid trig
+func mandelIterFast(cx, cy float64, maxIter int, exp float64) int {
+	if exp == 2 {
+		var zx, zy float64
+		for i := 0; i < maxIter; i++ {
+			// z = z^2 + c
+			// (x+iy)^2 = (x^2 - y^2) + i(2xy)
+			x2 := zx * zx
+			y2 := zy * zy
+			if x2+y2 > 4.0 {
+				return i
+			}
+			zy = 2*zx*zy + cy
+			zx = x2 - y2 + cx
+		}
+		return maxIter
+	}
+	// Fallback to general exponent method
+	return mandelbrotIteration(cx, cy, maxIter, exp)
 }
 
 func generateMandelbrot(params FractalParams, randCfg *RandPaletteConfig) []map[string]int {
