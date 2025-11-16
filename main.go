@@ -259,6 +259,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         let isSelecting = false;
         let selectStart = null; // { nx, ny }
         let lastRenderedImageData = null;
+        let lastRandPalette = null; // cache of server-provided random palette params
         
         // Get the base path from the current location
         // When accessed via /fractals/v1, pathname will be /fractals/v1
@@ -402,7 +403,12 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             img.onload = function(){
                 ctx.clearRect(0,0,canvas.width,canvas.height);
                 ctx.drawImage(img, 0, 0, srcW, srcH, 0, 0, canvas.width, canvas.height);
+                // cache for overlay drawing
                 try { lastRenderedImageData = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch (e) { lastRenderedImageData = null; }
+                // cache palette info from server (to reuse for printing)
+                if (data && data.randPalette) {
+                    lastRandPalette = data.randPalette;
+                }
             };
             img.src = 'data:image/png;base64,' + data.pngData;
         }
@@ -466,32 +472,58 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                     if(h<60){r1=c;g1=x;b1=0;} else if(h<120){r1=x;g1=c;b1=0;} else if(h<180){r1=0;g1=c;b1=x;} else if(h<240){r1=0;g1=x;b1=c;} else if(h<300){r1=x;g1=0;b1=c;} else {r1=c;g1=0;b1=x;}
                     return [clamp255(Math.round((r1+m)*255)),clamp255(Math.round((g1+m)*255)),clamp255(Math.round((b1+m)*255))];
                 }
-                // Setup progress elements
+                // Generate on offscreen canvas with chunked updates in Web Worker
+                var off=doc.createElement('canvas');
+                off.width=exportW; off.height=exportH;
+                var octx=off.getContext('2d');
+                var img=octx.createImageData(exportW,exportH);
+                var scale=4.0/zoom;
+                var msgEl=doc.getElementById('msg');
                 var fillEl=doc.getElementById('fill');
                 var pctEl=doc.getElementById('pct');
+                // Build worker code
+                var workerCode = ''+
+                'self.onmessage=function(e){\n'+
+                ' var d=e.data;\n'+
+                ' var exportW=d.exportW, exportH=d.exportH, cx=d.cx, cy=d.cy, zoom=d.zoom, maxIter=d.maxIter, exponent=d.exponent, palette=d.palette, randCfg=d.randCfg;\n'+
+                ' function clamp255(v){return v<0?0:(v>255?255:v);}\n'+
+                ' function lerp(a,b,t){return a+(b-a)*t;}\n'+
+                ' function hsvToRgb(h,s,v){var c=v*s;var x=c*(1-Math.abs((h/60%2)-1));var m=v-c;var r1=0,g1=0,b1=0;'+
+                   'if(h<60){r1=c;x=x;}else if(h<120){r1=x;c=c;}else if(h<180){g1=c;x=x; r1=0;}else if(h<240){g1=x;c=c; r1=0;}else if(h<300){r1=x; b1=c; g1=0;}else{ r1=c; b1=x; }'+
+                   'var r=Math.round((r1+m)*255), g=Math.round((g1+m)*255), b=Math.round((b1+m)*255); return [clamp255(r),clamp255(g),clamp255(b)];}\n'+
+                ' function mandelIter(cx,cy,maxIter,exp){var zx=0,zy=0;for(var i=0;i<maxIter;i++){if(zx*zx+zy*zy>4.0) return i; var r=Math.hypot(zx,zy); if(r===0){zx=cx;zy=cy;continue;} var theta=Math.atan2(zy,zx); var newR=Math.pow(r,exp); var newTheta=theta*exp; zx=newR*Math.cos(newTheta)+cx; zy=newR*Math.sin(newTheta)+cy;} return maxIter;}\n'+
+                ' var img=new Uint8ClampedArray(exportW*exportH*4); var scale=4.0/zoom;\n'+
+                ' var y=0; var chunk=32;\n'+
+                ' function colorFromIter(it){ var t=it/maxIter; if(palette==="random" && randCfg){ var h=(randCfg.baseHue + randCfg.hueSpan*t)%360; var s=lerp(randCfg.satMin, randCfg.satMax, t); var v=lerp(randCfg.valMin, randCfg.valMax, t); var rgb=hsvToRgb(h,s,v); return rgb; } return hsvToRgb(360*t,1,1);}\n'+
+                ' function step(){ var end=Math.min(exportH, y+chunk); for(var yy=y; yy<end; yy++){ var ny=yy/exportH; for(var x=0;x<exportW;x++){ var nx=x/exportW; var cxp=nx*scale - scale/2 + cx; var cyp=ny*scale - scale/2 + cy; var it=mandelIter(cxp,cyp,maxIter,exponent); var rgb=colorFromIter(it); var idx=(yy*exportW+x)*4; img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+1+2]; img[idx+3]=255; } } y=end; postMessage({type:"progress", p: Math.floor(100*y/exportH) }); if(y<exportH){ setTimeout(step,0); } else { postMessage({type:"done", pixels: img, width: exportW, height: exportH }); } }\n'+
+                ' step();\n'+
+                '};';
 
-                // Create worker code
-                var workerSrc='';
-                workerSrc+='self.onmessage=function(e){';
-                workerSrc+='var d=e.data,W=d.W,H=d.H,cx=d.cx,cy=d.cy,zoom=d.zoom,maxIter=d.maxIter,exp=d.exp,palette=d.palette,randCfg=d.randCfg;';
-                workerSrc+='function c255(v){return v<0?0:(v>255?255:v);}';
-                workerSrc+='function lrp(a,b,t){return a+(b-a)*t;}';
-                workerSrc+='function hsv2rgb(h,s,v){var c=v*s;var x=c*(1-Math.abs(((h/60)%2)-1));var m=v-c;var r1=0,g1=0,b1=0;';
-                workerSrc+='if(h<60){r1=c;g1=x;b1=0;} else if(h<120){r1=x;g1=c;b1=0;} else if(h<180){r1=0;g1=c;b1=x;} else if(h<240){r1=0;g1=x;b1=c;} else if(h<300){r1=x;g1=0;b1=c;} else {r1=c;g1=0;b1=x;}';
-                workerSrc+='return [c255(Math.round((r1+m)*255)),c255(Math.round((g1+m)*255)),c255(Math.round((b1+m)*255))];}';
-                workerSrc+='function colorFromIter(it,mi){if(it===mi){return [0,0,0];} var t=it/mi; if(palette==="random" && randCfg){var h=(randCfg.baseHue+randCfg.hueSpan*t)%360; var s=lrp(randCfg.satMin,randCfg.satMax,t); var v=lrp(randCfg.valMin,randCfg.valMax,t); return hsv2rgb(h,s,v);} return hsv2rgb(360*t,1,1);}';
-                workerSrc+='function mandel(cx,cy,mi,ex){var zx=0,zy=0; for(var i=0;i<mi;i++){if(zx*zx+zy*zy>4.0){return i;} var r=Math.hypot(zx,zy); if(r===0){zx=cx;zy=cy;continue;} var th=Math.atan2(zy,zx); var nr=Math.pow(r,ex); var nth=th*ex; zx=nr*Math.cos(nth)+cx; zy=nr*Math.sin(nth)+cy;} return mi;}';
-                workerSrc+='var buf=new Uint8ClampedArray(W*H*4); var scale=4.0/zoom; var chunk=24; for(var y=0;y<H;y++){ var ny=y/H; for(var x=0;x<W;x++){ var nx=x/W; var cxp=nx*scale - scale/2 + cx; var cyp=ny*scale - scale/2 + cy; var it=mandel(cxp,cyp,maxIter,exp); var rgb=colorFromIter(it,maxIter); var idx=(y*W+x)*4; buf[idx]=rgb[0]; buf[idx+1]=rgb[1]; buf[idx+2]=rgb[2]; buf[idx+3]=255;} if(y%chunk===chunk-1){ self.postMessage({type:"progress", y:y+1, H:H}); } } self.postMessage({type:"done", buffer:buf.buffer}, [buf.buffer]);';
-                workerSrc+='}';
-
-                var blob=new doc.defaultView.Blob([workerSrc],{type:'application/javascript'});
-                var url=doc.defaultView.URL.createObjectURL(blob);
-                var WorkerCtor=doc.defaultView.Worker;
-                var worker=new WorkerCtor(url);
-                // random palette config
-                var rnd=null; if(palette==='random'){ rnd={ baseHue: Math.random()*360, hueSpan: 180+Math.random()*180, satMin:0.6, satMax:1.0, valMin:0.8, valMax:1.0}; }
-                worker.onmessage=function(ev){ var msg=ev.data; if(msg.type==='progress'){ var p=Math.floor((msg.y/msg.H)*100); if(fillEl){fillEl.style.width=p+'%';} if(pctEl){pctEl.textContent=p+'%';} } else if(msg.type==='done'){ var off=doc.createElement('canvas'); off.width=exportW; off.height=exportH; var octx=off.getContext('2d'); var arr=new Uint8ClampedArray(msg.buffer); var img=octx.createImageData(exportW,exportH); img.data.set(arr); octx.putImageData(img,0,0); var dataUrl=off.toDataURL('image/png'); doc.open(); doc.write('<!DOCTYPE html><html><head><title>Fractal 4K Export</title><style>html,body{margin:0;height:100%;background:#000;} .toolbar{position:fixed;top:10px;right:10px;z-index:5} .btn{padding:8px 12px;border:1px solid #555;border-radius:4px;background:#333;color:#e0e0e0;text-decoration:none} img{display:block;width:100vw;height:100vh;object-fit:contain;background:#000;}</style></head><body>'); doc.write('<div class="toolbar"><a id="dl" class="btn" download="fractal-4k.png" href="'+dataUrl+'">Download PNG (4K)</a></div>'); doc.write('<img src="'+dataUrl+'" alt="Fractal 4K"/>'); doc.write('<scr'+'ipt>window.addEventListener("load",function(){var a=document.getElementById("dl"); if(a){try{a.click();}catch(e){}}});</scr'+'ipt>'); doc.write('</body></html>'); doc.close(); worker.terminate(); doc.defaultView.URL.revokeObjectURL(url);} };
-                worker.postMessage({ W:exportW, H:exportH, cx:cx, cy:cy, zoom:zoom, maxIter:maxIter, exp:exponent, palette:palette, randCfg:rnd });
+                var blob = new Blob([workerCode], {type:'application/javascript'});
+                var worker = new Worker(URL.createObjectURL(blob));
+                worker.onmessage = function(ev){
+                    if(ev.data && ev.data.type === 'progress'){
+                        var p = ev.data.p|0; if(fillEl){fillEl.style.width=p+'%';} if(pctEl){pctEl.textContent=p+'%';}
+                    } else if (ev.data && ev.data.type === 'done'){
+                        // draw received pixels to offscreen then show
+                        var w0 = ev.data.width, h0 = ev.data.height;
+                        var id = octx.createImageData(w0,h0);
+                        id.data.set(ev.data.pixels);
+                        octx.putImageData(id,0,0);
+                        var url = off.toDataURL('image/png');
+                        doc.open();
+                        doc.write('<!DOCTYPE html><html><head><title>Fractal 4K Export</title><style>html,body{margin:0;height:100%;background:#000;} .toolbar{position:fixed;top:10px;right:10px;z-index:5} .btn{padding:8px 12px;border:1px solid #555;border-radius:4px;background:#333;color:#e0e0e0;text-decoration:none} img{display:block;width:100vw;height:100vh;object-fit:contain;background:#000;}</style></head><body>');
+                        doc.write('<div class="toolbar"><a id="dl" class="btn" download="fractal-4k.png" href="'+url+'">Download PNG (4K)</a></div>');
+                        doc.write('<img src="'+url+'" alt="Fractal 4K"/>');
+                        doc.write('<scr'+'ipt>window.addEventListener("load",function(){var a=document.getElementById("dl"); if(a){try{a.click();}catch(e){}}});</scr'+'ipt>');
+                        doc.write('</body></html>');
+                        doc.close();
+                        worker.terminate();
+                    }
+                };
+                var initRand = null;
+                if ('random' === palette && typeof lastRandPalette === 'object' && lastRandPalette){ initRand = lastRandPalette; }
+                worker.postMessage({exportW: exportW, exportH: exportH, cx: cx, cy: cy, zoom: zoom, maxIter: maxIter, exponent: exponent, palette: palette, randCfg: initRand});
             })(w.document);
          }
 
@@ -644,6 +676,7 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 
 	// Optional random palette configuration for this request
 	var randCfg *RandPaletteConfig
+	var randObj map[string]float64
 	if params.ColorPalette == "random" {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		randCfg = &RandPaletteConfig{
@@ -653,6 +686,14 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 			satMax:  1.0,
 			valMin:  0.8,
 			valMax:  1.0,
+		}
+		randObj = map[string]float64{
+			"baseHue": randCfg.baseHue,
+			"hueSpan": randCfg.hueSpan,
+			"satMin":  randCfg.satMin,
+			"satMax":  randCfg.satMax,
+			"valMin":  randCfg.valMin,
+			"valMax":  randCfg.valMax,
 		}
 	}
 
@@ -729,6 +770,7 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 		"renderWidth":   effW,
 		"renderHeight":  effH,
 		"usedIterations": effIter,
+		"randPalette": randObj,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
