@@ -46,9 +46,9 @@ var renderSem = make(chan struct{}, 1) // limit to 1 concurrent render
 
 // Tunables with env overrides
 var (
-    defaultMaxPixels    = envInt("FRAC_MAX_PIXELS", 400000)
-    defaultMaxIter      = envInt("FRAC_MAX_ITER", 100)
-    renderConcurrency   = envInt("FRAC_MAX_CONCURRENCY", 1)
+    defaultMaxPixels  = envInt("FRAC_MAX_PIXELS", 300000) // tighter default cap ~0.3M px
+    defaultMaxIter    = envInt("FRAC_MAX_ITER", 90)
+    renderConcurrency = envInt("FRAC_MAX_CONCURRENCY", 1)
 )
 
 func init() {
@@ -636,14 +636,14 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 	maxIt := defaultMaxIter
 	switch strings.ToLower(params.Quality) {
 	case "low":
-		maxPx = int(float64(defaultMaxPixels) * 0.5) // tighter cap
-		if maxPx < 200000 { maxPx = 200000 }
-		if defaultMaxIter > 80 { maxIt = 80 }
+		// very constrained: ~120k px, 60 iters
+		if defaultMaxPixels > 120000 { maxPx = 120000 } else { maxPx = defaultMaxPixels }
+		if defaultMaxIter > 60 { maxIt = 60 }
 	case "medium":
-		// use defaults
+		// use defaults (approx 0.3M px, 90 iters)
 	case "high":
 		maxPx = int(float64(defaultMaxPixels) * 2)
-		if maxPx < 800000 { maxPx = 800000 }
+		if maxPx < 600000 { maxPx = 600000 }
 		if maxIt < 120 { maxIt = 120 }
 	case "auto", "":
 		// leave defaults
@@ -775,6 +775,9 @@ func generateMandelbrot(params FractalParams, randCfg *RandPaletteConfig) []map[
 	xOffset := params.CenterX
 	yOffset := params.CenterY
 
+	// choose iterator based on exponent
+	useFast := math.Abs(params.Exponent-2.0) < 1e-9
+
 	for y := 0; y < params.Height; y++ {
 		for x := 0; x < params.Width; x++ {
 			// Map pixel coordinates to complex plane
@@ -782,7 +785,20 @@ func generateMandelbrot(params FractalParams, randCfg *RandPaletteConfig) []map[
 			cy := (float64(y)/float64(params.Height))*scale - scale/2 + yOffset
 
 			// Calculate Mandelbrot iteration
-			iter := mandelbrotIteration(cx, cy, params.MaxIter, params.Exponent)
+			var iter int
+			if useFast {
+				// fast quadratic iteration without trig
+				zx, zy := 0.0, 0.0
+				for i := 0; i < params.MaxIter; i++ {
+					if zx*zx+zy*zy > 4.0 { iter = i; break }
+					nx := zx*zx - zy*zy + cx
+					zy = 2.0*zx*zy + cy
+					zx = nx
+					if i == params.MaxIter-1 { iter = params.MaxIter }
+				}
+			} else {
+				iter = mandelbrotIteration(cx, cy, params.MaxIter, params.Exponent)
+			}
 
 			// Color based on iteration count
 			r, g, b := colorFromIteration(iter, params.MaxIter, params.ColorPalette, randCfg)
