@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 	"math/rand"
 	"image"
@@ -15,6 +17,7 @@ import (
 	"image/png"
 	"bytes"
 	"context"
+	"runtime"
 )
 
 type FractalParams struct {
@@ -26,6 +29,7 @@ type FractalParams struct {
 	MaxIter int     `json:"maxIter"`
 	Exponent float64 `json:"exponent"` // Power for z^n + c (default 2.0 for standard Mandelbrot)
 	ColorPalette string `json:"colorPalette"` // Color palette name: "classic", "fire", "ocean", "sunset"
+	Quality      string `json:"quality"`      // "low" | "medium" | "high" | "auto"
 }
 
 // Configuration for per-request random palette
@@ -39,6 +43,26 @@ type RandPaletteConfig struct {
 }
 
 var renderSem = make(chan struct{}, 1) // limit to 1 concurrent render
+
+// Tunables with env overrides
+var (
+    defaultMaxPixels    = envInt("FRAC_MAX_PIXELS", 400000)
+    defaultMaxIter      = envInt("FRAC_MAX_ITER", 100)
+    renderConcurrency   = envInt("FRAC_MAX_CONCURRENCY", 1)
+)
+
+func init() {
+    // reset semaphore size from env
+    if renderConcurrency < 1 { renderConcurrency = 1 }
+    renderSem = make(chan struct{}, renderConcurrency)
+}
+
+func envInt(key string, def int) int {
+    if v := os.Getenv(key); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 { return n }
+    }
+    return def
+}
 
 func main() {
     // Serve static files
@@ -211,6 +235,18 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         const btnGen = document.querySelector('button[onclick="generateFractal()"]');
         const btnReset = document.querySelector('button[onclick="resetView()"]');
         const btnPrint = document.querySelector('button[onclick="printFractal()"]');
+        // Determine client quality heuristic (auto)
+        function detectQuality(){
+            const dm = navigator.deviceMemory || 0; // in GiB (may be undefined)
+            const hc = navigator.hardwareConcurrency || 1;
+            const mp = Math.max(1, (window.innerWidth*window.innerHeight));
+            // Heuristic: small memory or few cores or huge viewport => lower quality
+            if (dm && dm < 2) return 'low';
+            if (hc <= 2) return 'low';
+            if (mp > 2_000_000) return 'medium';
+            return 'medium';
+        }
+        let quality = detectQuality();
         // Rectangle zoom state
         let isSelecting = false;
         let selectStart = null; // { nx, ny }
@@ -307,10 +343,11 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             console.log('Constructed API URL:', apiUrl);
             console.log('Will fetch from:', apiUrl);
             
+            const body = Object.assign({}, params, { quality });
             fetch(apiUrl, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(params)
+                body: JSON.stringify(body)
             })
             .then(response => {
                 if (!response.ok) {
@@ -593,23 +630,41 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enforce server-side pixel and iteration caps for low-resource environments
-	constMaxPixels := 400000 // ~0.4M pixels cap to protect tiny instances
+	// Enforce server-side pixel and iteration caps for low-resource environments, with quality mapping
+	// Map quality to caps
+	maxPx := defaultMaxPixels
+	maxIt := defaultMaxIter
+	switch strings.ToLower(params.Quality) {
+	case "low":
+		maxPx = int(float64(defaultMaxPixels) * 0.5) // tighter cap
+		if maxPx < 200000 { maxPx = 200000 }
+		if defaultMaxIter > 80 { maxIt = 80 }
+	case "medium":
+		// use defaults
+	case "high":
+		maxPx = int(float64(defaultMaxPixels) * 2)
+		if maxPx < 800000 { maxPx = 800000 }
+		if maxIt < 120 { maxIt = 120 }
+	case "auto", "":
+		// leave defaults
+	}
 	reqW := params.Width
 	reqH := params.Height
 	if reqW <= 0 { reqW = 1 }
 	if reqH <= 0 { reqH = 1 }
 	// scale down if over cap (preserve aspect)
 	scale := 1.0
-	if float64(reqW*reqH) > float64(constMaxPixels) {
-		scale = math.Sqrt(float64(constMaxPixels) / float64(reqW*reqH))
+	if float64(reqW*reqH) > float64(maxPx) {
+		scale = math.Sqrt(float64(maxPx) / float64(reqW*reqH))
 	}
 	effW := int(math.Max(1, math.Round(float64(reqW)*scale)))
 	effH := int(math.Max(1, math.Round(float64(reqH)*scale)))
 	// also scale iterations a bit to keep time bounded when downscaling is applied
 	effIter := params.MaxIter
 	if scale < 1.0 {
-		effIter = int(math.Max(10, math.Round(float64(params.MaxIter)*math.Sqrt(scale))))
+		effIter = int(math.Max(10, math.Min(float64(maxIt), math.Round(float64(params.MaxIter)*math.Sqrt(scale)))))
+	} else if params.MaxIter > maxIt {
+		effIter = maxIt
 	}
 	// use effective sizes for rendering
 	effParams := params
@@ -680,6 +735,9 @@ func renderPNG(ctx context.Context, params FractalParams, randCfg *RandPaletteCo
 			img.Pix[off+1] = uint8(g)
 			img.Pix[off+2] = uint8(b)
 			img.Pix[off+3] = 255
+		}
+		if y%16 == 0 { // periodically yield to scheduler to avoid starving system
+			runtime.Gosched()
 		}
 	}
 	var buf bytes.Buffer
