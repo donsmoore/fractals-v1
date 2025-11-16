@@ -13,7 +13,6 @@ import (
 	"time"
 	"math/rand"
 	"image"
-	"image/color"
 	"image/png"
 	"bytes"
 	"context"
@@ -218,6 +217,15 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                     <option value="random">Random</option>
                 </select>
                 </div>
+                <div class="control-group">
+                    <label for="qualitySelect">Quality:</label>
+                    <select id="qualitySelect" onchange="updateQuality()" style="padding: 6px; border: 1px solid #555; border-radius: 4px; background: #333; color: #e0e0e0; min-width: 120px; max-width: 140px;">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="auto">Auto</option>
+                    </select>
+                </div>
             </div>
             <div class="controls-right">
                 <button onclick="generateFractal()">Generate Fractal</button>
@@ -280,6 +288,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('exponentInput').value = params.exponent;
             document.getElementById('paletteSelect').value = params.colorPalette;
+            document.getElementById('qualitySelect').value = quality; // Initialize quality
         });
 
         function sizeCanvasToViewport() {
@@ -343,11 +352,23 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             console.log('Constructed API URL:', apiUrl);
             console.log('Will fetch from:', apiUrl);
             
-            const body = Object.assign({}, params, { quality });
+            var qSel = document.getElementById('qualitySelect');
+            var qVal = qSel ? qSel.value : 'low';
+            var req = {
+                width: params.width,
+                height: params.height,
+                centerX: params.centerX,
+                centerY: params.centerY,
+                zoom: params.zoom,
+                maxIter: params.maxIter,
+                exponent: params.exponent,
+                colorPalette: params.colorPalette,
+                quality: qVal
+            };
             fetch(apiUrl, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body)
+                body: JSON.stringify(req)
             })
             .then(response => {
                 if (!response.ok) {
@@ -473,6 +494,11 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 worker.postMessage({ W:exportW, H:exportH, cx:cx, cy:cy, zoom:zoom, maxIter:maxIter, exp:exponent, palette:palette, randCfg:rnd });
             })(w.document);
          }
+
+        function updateQuality(){
+            // apply new quality immediately
+            generateFractal();
+        }
 
         // Map normalized canvas coordinates to complex plane at current view
         function normToComplex(nx, ny) {
