@@ -230,7 +230,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             <div class="controls-right">
                 <button onclick="generateFractal()">Generate Fractal</button>
                 <button onclick="resetView()">Reset View</button>
-                <button onclick="printFractal()">Print</button>
+                <button onclick="printFractal()">Export</button>
             </div>
         </div>
     </div>
@@ -260,6 +260,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         let selectStart = null; // { nx, ny }
         let lastRenderedImageData = null;
         let lastRandPalette = null; // cache of server-provided random palette params
+        let lastUsedIterations = null; // server-reported effective iterations
         
         // Get the base path from the current location
         // When accessed via /fractals/v1, pathname will be /fractals/v1
@@ -386,6 +387,10 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 }
                 drawFractal(data);
                 updateInfoOverlay();
+                // cache used iterations for consistent export
+                if (data && typeof data.usedIterations === 'number') {
+                    lastUsedIterations = data.usedIterations;
+                }
             })
             .catch(error => {
                 console.error('Error:', error);
@@ -445,14 +450,29 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         }
  
          function printFractal() {
-            // Generate a true 4K image client-side with current view parameters
-            const exportW = 3840, exportH = 2160;
+            // Generate a high-res image client-side with current view parameters
+            // Match current canvas aspect ratio; cap to 4K on long edge
             const cx = params.centerX;
             const cy = params.centerY;
             const zoom = params.zoom;
-            const maxIter = params.maxIter;
             const exponent = params.exponent || 2.0;
             const palette = params.colorPalette || 'classic';
+            const effIter = (typeof lastUsedIterations === 'number' && lastUsedIterations>0) ? lastUsedIterations : params.maxIter;
+
+            const aspect = canvas.width / Math.max(1, canvas.height);
+            let exportW, exportH;
+            const maxW = 3840, maxH = 2160;
+            if (aspect >= 1) {
+                // landscape-ish
+                exportW = maxW;
+                exportH = Math.round(exportW / aspect);
+                if (exportH > maxH) { exportH = maxH; exportW = Math.round(exportH * aspect); }
+            } else {
+                // portrait-ish (unlikely, but handle)
+                exportH = maxH;
+                exportW = Math.round(exportH * aspect);
+                if (exportW > maxW) { exportW = maxW; exportH = Math.round(exportW / aspect); }
+            }
 
             const w = window.open('about:blank', '_blank');
             if (!w) return; // popup blocked
@@ -487,15 +507,17 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 ' var d=e.data;\n'+
                 ' var exportW=d.exportW, exportH=d.exportH, cx=d.cx, cy=d.cy, zoom=d.zoom, maxIter=d.maxIter, exponent=d.exponent, palette=d.palette, randCfg=d.randCfg;\n'+
                 ' function clamp255(v){return v<0?0:(v>255?255:v);}\n'+
-                ' function lerp(a,b,t){return a+(b-a)*t;}\n'+
-                ' function hsvToRgb(h,s,v){var c=v*s;var x=c*(1-Math.abs((h/60%2)-1));var m=v-c;var r1=0,g1=0,b1=0;'+
-                   'if(h<60){r1=c;x=x;}else if(h<120){r1=x;c=c;}else if(h<180){g1=c;x=x; r1=0;}else if(h<240){g1=x;c=c; r1=0;}else if(h<300){r1=x; b1=c; g1=0;}else{ r1=c; b1=x; }'+
-                   'var r=Math.round((r1+m)*255), g=Math.round((g1+m)*255), b=Math.round((b1+m)*255); return [clamp255(r),clamp255(g),clamp255(b)];}\n'+
+                ' function lerp(a,b,t){ return a+(b-a)*t }\n'+
+                ' function hsvToRgb(h,s,v){'+
+                '  var c=v*s; var x=c*(1-Math.abs((h/60)%2-1)); var m=v-c; var r1=0,g1=0,b1=0;'+
+                '  if(h<60){r1=c; g1=x; b1=0;} else if(h<120){r1=x; g1=c; b1=0;} else if(h<180){r1=0; g1=c; b1=x;} else if(h<240){r1=0; g1=x; b1=c;} else if(h<300){r1=x; g1=0; b1=c;} else { r1=c; g1=0; b1=x; }'+
+                '  var r=Math.round((r1+m)*255), g=Math.round((g1+m)*255), b=Math.round((b1+m)*255);'+
+                '  return [clamp255(r),clamp255(g),clamp255(b)]; }\n'+
                 ' function mandelIter(cx,cy,maxIter,exp){var zx=0,zy=0;for(var i=0;i<maxIter;i++){if(zx*zx+zy*zy>4.0) return i; var r=Math.hypot(zx,zy); if(r===0){zx=cx;zy=cy;continue;} var theta=Math.atan2(zy,zx); var newR=Math.pow(r,exp); var newTheta=theta*exp; zx=newR*Math.cos(newTheta)+cx; zy=newR*Math.sin(newTheta)+cy;} return maxIter;}\n'+
                 ' var img=new Uint8ClampedArray(exportW*exportH*4); var scale=4.0/zoom;\n'+
                 ' var y=0; var chunk=32;\n'+
-                ' function colorFromIter(it){ var t=it/maxIter; if(palette==="random" && randCfg){ var h=(randCfg.baseHue + randCfg.hueSpan*t)%360; var s=lerp(randCfg.satMin, randCfg.satMax, t); var v=lerp(randCfg.valMin, randCfg.valMax, t); var rgb=hsvToRgb(h,s,v); return rgb; } return hsvToRgb(360*t,1,1);}\n'+
-                ' function step(){ var end=Math.min(exportH, y+chunk); for(var yy=y; yy<end; yy++){ var ny=yy/exportH; for(var x=0;x<exportW;x++){ var nx=x/exportW; var cxp=nx*scale - scale/2 + cx; var cyp=ny*scale - scale/2 + cy; var it=mandelIter(cxp,cyp,maxIter,exponent); var rgb=colorFromIter(it); var idx=(yy*exportW+x)*4; img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+1+2]; img[idx+3]=255; } } y=end; postMessage({type:"progress", p: Math.floor(100*y/exportH) }); if(y<exportH){ setTimeout(step,0); } else { postMessage({type:"done", pixels: img, width: exportW, height: exportH }); } }\n'+
+                ' function colorFromIter(it){ if(it>=maxIter) return [0,0,0]; var t=it/maxIter; if(palette==="random" && randCfg){ var h=( (randCfg.baseHue + randCfg.hueSpan*t) % 360 ); var s=lerp(randCfg.satMin, randCfg.satMax, t); var v=lerp(randCfg.valMin, randCfg.valMax, t); return hsvToRgb(h,s,v);} return hsvToRgb(360*t,1,1);}\n'+
+                ' function step(){ var end=Math.min(exportH, y+chunk); for(var yy=y; yy<end; yy++){ var ny=yy/exportH; for(var x=0;x<exportW;x++){ var nx=x/exportW; var cxp=nx*scale - scale/2 + cx; var cyp=ny*scale - scale/2 + cy; var it=mandelIter(cxp,cyp,maxIter,exponent); var rgb=colorFromIter(it); var idx=(yy*exportW+x)*4; img.data?0:0; img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255; } } y= end; var p=Math.floor((y/exportH)*100); postMessage({type:"progress", p:p}); if(y<exportH){ setTimeout(step,0); } else { postMessage({type:"done", pixels: img, width: exportW, height: exportH }); } }\n'+
                 ' step();\n'+
                 '};';
 
@@ -523,7 +545,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 };
                 var initRand = null;
                 if ('random' === palette && typeof lastRandPalette === 'object' && lastRandPalette){ initRand = lastRandPalette; }
-                worker.postMessage({exportW: exportW, exportH: exportH, cx: cx, cy: cy, zoom: zoom, maxIter: maxIter, exponent: exponent, palette: palette, randCfg: initRand});
+                worker.postMessage({exportW: exportW, exportH: exportH, cx: cx, cy: cy, zoom: zoom, maxIter: effIter, exponent: exponent, palette: palette, randCfg: initRand});
             })(w.document);
          }
 
