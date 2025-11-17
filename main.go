@@ -81,6 +81,7 @@ func main() {
     // API endpoints
     http.HandleFunc("/api/fractal", handleFractal)
     http.HandleFunc("/api/health", handleHealth)
+    http.HandleFunc("/favicon.ico", handleFavicon)
 
     // Root handler
     http.HandleFunc("/", handleRoot)
@@ -120,6 +121,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fractals v1</title>
+    <link rel="icon" type="image/png" href="/favicon.ico">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -1785,5 +1787,75 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// Generate a small Mandelbrot fractal favicon
+func generateFavicon() ([]byte, error) {
+	size := 64
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	
+	// Center and zoom for an interesting part of the Mandelbrot set
+	centerX := -0.5
+	centerY := 0.0
+	zoom := 1.0
+	maxIter := 50
+	scale := 4.0 / zoom
+	
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			// Map pixel to complex plane
+			cx := (float64(x)/float64(size))*scale - scale/2 + centerX
+			cy := (float64(y)/float64(size))*scale - scale/2 + centerY
+			
+			// Calculate Mandelbrot iteration
+			zx, zy := 0.0, 0.0
+			iter := 0
+			for iter < maxIter {
+				if zx*zx+zy*zy > 4.0 {
+					break
+				}
+				x2 := zx * zx
+				y2 := zy * zy
+				zy = 2*zx*zy + cy
+				zx = x2 - y2 + cx
+				iter++
+			}
+			
+			// Color based on iteration count (vibrant colors)
+			var r, g, b int
+			if iter >= maxIter {
+				r, g, b = 0, 0, 0 // Black for inside set
+			} else {
+				t := float64(iter) / float64(maxIter)
+				// Use HSV to RGB for vibrant colors
+				h := 360.0 * t
+				r, g, b = hsvToRgb(h, 1.0, 1.0)
+			}
+			
+			offset := y*img.Stride + x*4
+			img.Pix[offset+0] = uint8(r)
+			img.Pix[offset+1] = uint8(g)
+			img.Pix[offset+2] = uint8(b)
+			img.Pix[offset+3] = 255
+		}
+	}
+	
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func handleFavicon(w http.ResponseWriter, r *http.Request) {
+	favicon, err := generateFavicon()
+	if err != nil {
+		http.Error(w, "Error generating favicon", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 1 day
+	w.Write(favicon)
 }
 
