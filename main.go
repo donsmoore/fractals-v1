@@ -35,6 +35,7 @@ type FractalParams struct {
 	JuliaCReal float64 `json:"juliaCReal"` // Julia set constant (real part)
 	JuliaCImag float64 `json:"juliaCImag"` // Julia set constant (imaginary part)
 	NewtonDegree int `json:"newtonDegree"` // Newton fractal polynomial degree (2-6)
+	MengerDepth int `json:"mengerDepth"` // Menger Sponge iteration depth
 	IFSType string `json:"ifsType"` // IFS type: "fern", "sierpinski", "dragon", "tree", "spiral"
 	IFSPoints int `json:"ifsPoints"` // Number of points to generate for IFS
 	ColorPalette string `json:"colorPalette"` // Color palette name: "classic", "random"
@@ -236,6 +237,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <option value="dragon">Dragon Curve</option>
                             <option value="tree">Tree</option>
                             <option value="spiral">Spiral</option>
+                            <option value="menger">Menger Sponge</option>
                         </select>
                     </div>
                 </div>
@@ -264,6 +266,13 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <option value="5">5</option>
                             <option value="6">6</option>
                         </select>
+                    </div>
+                </div>
+                <div class="control-group" id="mengerGroup" style="display:none;">
+                    <label for="mengerDepthInput">Iteration Depth</label>
+                    <div class="control-row">
+                        <input type="number" id="mengerDepthInput" step="1" min="1" max="5" value="3" onkeypress="if(event.key==='Enter') updateMenger()">
+                        <button onclick="updateMenger()">Update</button>
                     </div>
                 </div>
                 <div class="control-group">
@@ -348,6 +357,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             juliaCReal: -0.7269,
             juliaCImag: 0.1889,
             newtonDegree: 3,
+            mengerDepth: 3,
             ifsType: 'fern',
             ifsPoints: 500,  // Always use maximum points for IFS
             colorPalette: 'classic'  // Default color palette
@@ -360,6 +370,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             document.getElementById('juliaCRealInput').value = params.juliaCReal;
             document.getElementById('juliaCImagInput').value = params.juliaCImag;
             document.getElementById('newtonDegreeSelect').value = params.newtonDegree;
+            document.getElementById('mengerDepthInput').value = params.mengerDepth;
             document.getElementById('paletteSelect').value = params.colorPalette;
             document.getElementById('qualitySelect').value = quality; // Initialize quality
             updateFractalType(); // Show/hide appropriate controls
@@ -440,6 +451,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 juliaCReal: params.juliaCReal,
                 juliaCImag: params.juliaCImag,
                 newtonDegree: params.newtonDegree,
+                mengerDepth: params.mengerDepth,
                 ifsType: (params.fractalType === 'fern' || params.fractalType === 'sierpinski' || params.fractalType === 'dragon' || params.fractalType === 'tree' || params.fractalType === 'spiral') ? params.fractalType : 'fern',
                 ifsPoints: params.ifsPoints,
                 colorPalette: params.colorPalette,
@@ -536,6 +548,8 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 (params.fractalType === 'julia') ? 'flex' : 'none';
             document.getElementById('newtonGroup').style.display = 
                 (params.fractalType === 'newton') ? 'flex' : 'none';
+            document.getElementById('mengerGroup').style.display = 
+                (params.fractalType === 'menger') ? 'flex' : 'none';
             
             // Reset view for certain fractals
             if (params.fractalType === 'newton') {
@@ -600,6 +614,19 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
             generateFractal();
         }
         
+        function updateMenger() {
+            const mengerDepthInput = document.getElementById('mengerDepthInput');
+            const newDepth = parseInt(mengerDepthInput.value);
+            
+            if (isNaN(newDepth) || newDepth < 1 || newDepth > 5) {
+                alert('Depth must be a number between 1 and 5');
+                mengerDepthInput.value = params.mengerDepth;
+                return;
+            }
+            
+            params.mengerDepth = newDepth;
+            generateFractal();
+        }
         
         function updatePalette() {
             const paletteSelect = document.getElementById('paletteSelect');
@@ -963,6 +990,16 @@ func handleFractal(w http.ResponseWriter, r *http.Request) {
 	if params.NewtonDegree > 6 {
 		params.NewtonDegree = 6
 	}
+	// Set default Menger depth
+	if params.MengerDepth == 0 {
+		params.MengerDepth = 3
+	}
+	if params.MengerDepth < 1 {
+		params.MengerDepth = 1
+	}
+	if params.MengerDepth > 5 {
+		params.MengerDepth = 5
+	}
 	// Set default IFS parameters
 	// Always use maximum points for IFS fractals
 	params.IFSPoints = 500
@@ -1115,6 +1152,8 @@ func renderPNG(ctx context.Context, params FractalParams, randCfg *RandPaletteCo
 				zx := (float64(x)/float64(params.Width))*scale - scale/2 + params.CenterX
 				zy := (float64(y)/float64(params.Height))*scale - scale/2 + params.CenterY
 				it = newtonIteration(zx, zy, params.NewtonDegree, params.MaxIter)
+			case "menger":
+				it = mengerSpongeIteration(x, y, params.Width, params.Height, params.CenterX, params.CenterY, params.Zoom, params.MengerDepth, params.MaxIter)
 			default:
 				// Default to Mandelbrot
 				cx := (float64(x)/float64(params.Width))*scale - scale/2 + params.CenterX
@@ -1345,6 +1384,117 @@ func newtonIteration(zx, zy float64, degree int, maxIter int) int {
 		}
 	}
 	return closestRoot * maxIter / degree
+}
+
+// Menger Sponge - 3D fractal rendered as 2D projection using ray marching
+func mengerSpongeIteration(x, y, width, height int, centerX, centerY, zoom float64, depth, maxIter int) int {
+	// Map screen coordinates to 3D space
+	// Use isometric projection for a nice 3D view
+	scale := 3.0 / zoom
+	
+	// Normalized coordinates
+	nx := float64(x) / float64(width)
+	ny := float64(y) / float64(height)
+	
+	// Screen space with center offset
+	sx := (nx - 0.5) * scale + centerX
+	sy := (ny - 0.5) * scale + centerY
+	
+	// Isometric projection: rotate 45 degrees around Y, then tilt
+	// Camera position for isometric view
+	camX := 0.0
+	camY := 0.0
+	camZ := 4.0
+	
+	// Ray direction (from camera through pixel)
+	rayX := sx - camX
+	rayY := sy - camY
+	rayZ := -camZ
+	
+	// Normalize ray
+	rayLen := math.Sqrt(rayX*rayX + rayY*rayY + rayZ*rayZ)
+	if rayLen < 1e-6 {
+		return maxIter
+	}
+	rayX /= rayLen
+	rayY /= rayLen
+	rayZ /= rayLen
+	
+	// Ray marching
+	stepSize := 0.01
+	maxDist := 10.0
+	dist := 0.0
+	
+	for dist < maxDist {
+		// Current position along ray
+		px := camX + rayX*dist
+		py := camY + rayY*dist
+		pz := camZ + rayZ*dist
+		
+		// Calculate distance to Menger Sponge
+		d := mengerDistance(px, py, pz, depth)
+		
+		if d < 0.001 {
+			// Hit the surface - use distance for coloring
+			// Closer = brighter
+			t := 1.0 - (dist / maxDist)
+			return int(t * float64(maxIter))
+		}
+		
+		dist += math.Max(d, stepSize)
+	}
+	
+	return maxIter // Background
+}
+
+// Distance field for Menger Sponge
+func mengerDistance(x, y, z float64, depth int) float64 {
+	// Fold space to create symmetry
+	x = math.Abs(x)
+	y = math.Abs(y)
+	z = math.Abs(z)
+	
+	// Scale factor for each iteration
+	scale := 1.0
+	
+	for i := 0; i < depth; i++ {
+		// Scale coordinates
+		x *= 3.0
+		y *= 3.0
+		z *= 3.0
+		scale *= 3.0
+		
+		// Fold into unit cube
+		x = math.Mod(x+1.5, 3.0) - 1.5
+		y = math.Mod(y+1.5, 3.0) - 1.5
+		z = math.Mod(z+1.5, 3.0) - 1.5
+		
+		// Remove center cube and face centers
+		// Center cube: all coordinates in [-0.5, 0.5]
+		if x > -0.5 && x < 0.5 && y > -0.5 && y < 0.5 && z > -0.5 && z < 0.5 {
+			return 0.5 / scale // Inside removed region
+		}
+		
+		// Face centers (6 faces) - simplified check
+		// Check if we're in the center strip of any face
+		if (x > -0.5 && x < 0.5 && y > -0.5 && y < 0.5) ||
+		   (x > -0.5 && x < 0.5 && z > -0.5 && z < 0.5) ||
+		   (y > -0.5 && y < 0.5 && z > -0.5 && z < 0.5) {
+			// Check if we're in the center of a face (one coord in center, others span full range)
+			if (x > -0.5 && x < 0.5 && (y < -0.5 || y > 0.5) && (z < -0.5 || z > 0.5)) ||
+			   (y > -0.5 && y < 0.5 && (x < -0.5 || x > 0.5) && (z < -0.5 || z > 0.5)) ||
+			   (z > -0.5 && z < 0.5 && (x < -0.5 || x > 0.5) && (y < -0.5 || y > 0.5)) {
+				return 0.5 / scale
+			}
+		}
+	}
+	
+	// Distance to unit cube
+	dx := math.Max(math.Abs(x)-0.5, 0.0)
+	dy := math.Max(math.Abs(y)-0.5, 0.0)
+	dz := math.Max(math.Abs(z)-0.5, 0.0)
+	
+	return math.Sqrt(dx*dx + dy*dy + dz*dz) / scale
 }
 
 // IFS (Iterated Function System) - Point-based rendering using chaos game
